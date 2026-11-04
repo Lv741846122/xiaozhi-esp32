@@ -50,4 +50,7 @@
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 #define DISPLAY_SPI_MODE      0
 
+// 2026-11-04: verified against LCDwiki ES3C28P (ILI9341V + FT6336G + ES8311)
+// screen/gpio/i2c pins all match; rebuilt for user hardware validation.
+
 #endif  // _BOARD_CONFIG_H_
