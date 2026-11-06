@@ -69,6 +69,49 @@ inline void GrokLine(int x0, int y0, int x1, int y1, int r) {
     }
 }
 
+// Even-odd point-in-polygon test, used to fill the 48-point eye rings so the
+// eyes are solid white shapes instead of thin outlines.
+inline bool GrokInsidePolygon(float x, float y, const int* px, const int* py, int n) {
+    bool inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float yi = static_cast<float>(py[i]);
+        float yj = static_cast<float>(py[j]);
+        if ((yi > y) != (yj > y)) {
+            float cross = static_cast<float>(px[j] - px[i]) * (y - yi) / (yj - yi) + px[i];
+            if (x < cross) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
+inline void GrokFillEye(const GrokPoint* pts) {
+    int xs[48], ys[48];
+    int minx = 10000, maxx = -10000, miny = 10000, maxy = -10000;
+    for (int i = 0; i < 48; ++i) {
+        xs[i] = kGrokCX + static_cast<int>((pts[i].x / 10.0f - kGrokViewCenter) * kGrokScale);
+        ys[i] = kGrokCY + static_cast<int>((pts[i].y / 10.0f - kGrokViewCenter) * kGrokScale) + kGrokEyeYOffset;
+        if (xs[i] < minx) minx = xs[i];
+        if (xs[i] > maxx) maxx = xs[i];
+        if (ys[i] < miny) miny = ys[i];
+        if (ys[i] > maxy) maxy = ys[i];
+    }
+    for (int y = miny; y <= maxy; ++y) {
+        if (y < kGrokBandTop || y >= kGrokBandBottom) {
+            continue;
+        }
+        for (int x = minx; x <= maxx; ++x) {
+            if (x < 0 || x >= kGrokScreenW) {
+                continue;
+            }
+            if (GrokInsidePolygon(x + 0.5f, y + 0.5f, xs, ys, 48)) {
+                GrokSetPixel(x, y);
+            }
+        }
+    }
+}
+
 inline void GrokCircle(int cx, int cy, int radius, int r) {
     int steps = static_cast<int>(2 * 3.1415926f * radius);
     for (int i = 0; i < steps; ++i) {
@@ -86,17 +129,9 @@ inline void GrokRebuild(int ring) {
     GrokCircle(kGrokCX, kGrokCY, kGrokRadius, 1);
 
     const GrokRing& g = kGrokRings[ring];
-    for (int eye = 0; eye < 2; ++eye) {
-        const GrokPoint* pts = eye == 0 ? g.left : g.right;
-        for (int i = 0; i < 48; ++i) {
-            int j = (i + 1) % 48;
-            int ax = kGrokCX + static_cast<int>((pts[i].x / 10.0f - kGrokViewCenter) * kGrokScale);
-            int ay = kGrokCY + static_cast<int>((pts[i].y / 10.0f - kGrokViewCenter) * kGrokScale) + kGrokEyeYOffset;
-            int bx = kGrokCX + static_cast<int>((pts[j].x / 10.0f - kGrokViewCenter) * kGrokScale);
-            int by = kGrokCY + static_cast<int>((pts[j].y / 10.0f - kGrokViewCenter) * kGrokScale) + kGrokEyeYOffset;
-            GrokLine(ax, ay, bx, by, 1);
-        }
-    }
+    // Solid white eyes (the previous build only drew the 48-point outline).
+    GrokFillEye(g.left);
+    GrokFillEye(g.right);
     s_grok_ring.store(ring, std::memory_order_relaxed);
     s_grok_mask_ready.store(true, std::memory_order_relaxed);
 }
