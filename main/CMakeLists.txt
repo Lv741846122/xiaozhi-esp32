@@ -1328,6 +1328,19 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_CYBERAI_VOCAT_V2_0 OR CONFIG
     endif()
 endif()
 
+# Freenove / LCDwiki ES3C28P: point the assets packer at the stock
+# esp_emote_assets resources, otherwise the EAF display mounts an empty
+# assets partition and renders nothing (black screen).
+if(CONFIG_BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD)
+    find_component_by_pattern("esp_emote_assets" EMOTE_ASSETS_COMPONENT EMOTE_ASSETS_PATH)
+    if(EMOTE_ASSETS_PATH)
+        set(EMOTE_EXTERNAL_PATH "${EMOTE_ASSETS_PATH}")
+        message(STATUS "Freenove: using emote assets from ${EMOTE_ASSETS_PATH}")
+    else()
+        message(WARNING "esp_emote_assets component not found; freenove emote display will have no resources")
+    endif()
+endif()
+
 if(CONFIG_BOARD_TYPE_ESP_HI)
 # Pin AAF assets to a fixed image_player commit so builds stay reproducible.
 # Only pack AAF files referenced by emoji_display.cc — the full test_8bit set
