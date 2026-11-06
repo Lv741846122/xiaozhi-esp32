@@ -23,15 +23,15 @@ namespace emote {
 constexpr int kGrokScreenW = 320;
 constexpr int kGrokScreenH = 240;
 constexpr int kGrokBandTop = 46;      // keep top status bar / icons / clock
-constexpr int kGrokBandBottom = 216;  // keep the subtitle strip (y 223..230)
+// The caption label can sit as high as y=206 after being centred, so the
+// repaint band must stop at 200 or the top half of the text gets erased.
+constexpr int kGrokBandBottom = 200;
 constexpr int kGrokCX = 160;
-constexpr int kGrokCY = 130;
-constexpr int kGrokRadius = 78;
-constexpr float kGrokScale = 156.0f / 229.0f;
+constexpr int kGrokCY = 123;
+constexpr int kGrokRadius = 72;
+constexpr float kGrokScale = 144.0f / 229.0f;
 constexpr float kGrokViewCenter = 114.2705f;
-// Kept at 0: the source rings already sit correctly inside the ball. A larger
-// offset pushes the long "happy"/"laughing" rings past the bottom outline.
-constexpr int kGrokEyeYOffset = 0;
+constexpr int kGrokEyeYOffset = 10;
 
 static std::atomic<int> s_grok_ring{0};
 static std::atomic<bool> s_grok_mask_ready{false};
