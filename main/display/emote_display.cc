@@ -96,8 +96,14 @@ static void OnFlushCallback(int x_start, int y_start, int x_end, int y_end, cons
         return;
     }
 
-    s_flush_count.fetch_add(1, std::memory_order_relaxed);
+    uint32_t flush_no = s_flush_count.fetch_add(1, std::memory_order_relaxed) + 1;
     s_last_flush_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+    // Log the first frame and then a heartbeat, so a silent screen can be told
+    // apart from a renderer that never sends anything to the panel.
+    if (flush_no == 1 || flush_no % 150 == 0) {
+        ESP_LOGI(TAG, "flush #%lu (%d,%d)-(%d,%d) data=%p",
+                 static_cast<unsigned long>(flush_no), x_start, y_start, x_end, y_end, data);
+    }
 }
 
 uint32_t GetFlushCount() {
@@ -193,6 +199,19 @@ bool EmoteDisplay::SetEmotion(const char* const emotion) {
     // same silence as a success.
     esp_err_t err = emote_set_anim_emoji(emote_handle_, emotion);
     if (err != ESP_OK) {
+        // An emotion the asset pack does not carry (the "gear" status icon is one)
+        // used to leave the canvas with nothing to draw, which looks exactly like a
+        // dead screen. Fall back to a stock emotion so the display still renders.
+        static const char* const kFallbacks[] = {"neutral", "Neutral", "happy", "Happy"};
+        for (const char* fb : kFallbacks) {
+            if (strcmp(fb, emotion) == 0) {
+                continue;
+            }
+            if (emote_set_anim_emoji(emote_handle_, fb) == ESP_OK) {
+                ESP_LOGW(TAG, "emotion \"%s\" unavailable, fell back to \"%s\"", emotion, fb);
+                return true;
+            }
+        }
         ESP_LOGW(TAG, "emotion \"%s\" not set: %s", emotion, esp_err_to_name(err));
         return false;
     }
