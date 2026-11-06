@@ -181,7 +181,10 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
             }
         }
     }
-    afe_config->agc_init = false;
+    // Boards with a single microphone have no hardware echo reference, so
+    // device-side AEC is unavailable. Automatic gain control still helps a
+    // lot with far-field / quiet speech before the 16k ASR uplink.
+    afe_config->agc_init = true;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     ESP_LOGI(TAG, "Before AFE create: free=%u min=%u largest=%u",

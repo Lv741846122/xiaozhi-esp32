@@ -5,6 +5,9 @@
 
 #define AUDIO_INPUT_SAMPLE_RATE  24000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
+// ES8311 ADC gain. Stock is 30; 36 gives noticeably better far-field pickup
+// on the ES3C28P's on-board mic. Lower it if you hear clipping or feedback.
+#define AUDIO_CODEC_INPUT_GAIN  36
 
 //音频iis部分
 #define AUDIO_I2S_GPIO_MCLK      GPIO_NUM_4  //MCLK
