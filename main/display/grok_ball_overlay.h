@@ -21,18 +21,19 @@
 
 namespace emote {
 
-constexpr int kGrokScreenW = 320;
-constexpr int kGrokScreenH = 240;
+// Portrait comparison build (native ILI9341 240x320).
+// For landscape use 320/240, band 46..200, centre (160,123), radius 72,
+// scale 144/229 and eyeYOffset 10.
+constexpr int kGrokScreenW = 240;
+constexpr int kGrokScreenH = 320;
 constexpr int kGrokBandTop = 46;      // keep top status bar / icons / clock
-// The caption label can sit as high as y=206 after being centred, so the
-// repaint band must stop at 200 or the top half of the text gets erased.
-constexpr int kGrokBandBottom = 200;
-constexpr int kGrokCX = 160;
-constexpr int kGrokCY = 123;
-constexpr int kGrokRadius = 72;
-constexpr float kGrokScale = 144.0f / 229.0f;
+constexpr int kGrokBandBottom = 272;  // keep the caption strip below
+constexpr int kGrokCX = 120;
+constexpr int kGrokCY = 154;
+constexpr int kGrokRadius = 100;
+constexpr float kGrokScale = 200.0f / 229.0f;
 constexpr float kGrokViewCenter = 114.2705f;
-constexpr int kGrokEyeYOffset = 10;
+constexpr int kGrokEyeYOffset = 0;
 
 static std::atomic<int> s_grok_ring{0};
 static std::atomic<bool> s_grok_mask_ready{false};

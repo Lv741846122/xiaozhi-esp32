@@ -379,13 +379,22 @@ void EmoteDisplay::LoadAssets() {
         return;
     }
     emote_load_assets(emote_handle_);
-    // The stock 320_240 layout places toast_label at x=25, which reads as
-    // off-centre on a 320px panel. UI objects only exist after assets load.
-    gfx_obj_t* toast = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL);
-    if (toast != nullptr && emote_lock(emote_handle_) == ESP_OK) {
-        gfx_obj_align(toast, GFX_ALIGN_TOP_MID, 0, 20);
-        emote_unlock(emote_handle_);
+    // The shipped 320_240 layout hard-codes toast_label at x=25 / width=280
+    // and status_icon at x=-145. Both are off-centre or clipped on a 240px
+    // wide portrait panel, so re-centre them once the objects exist.
+    if (emote_lock(emote_handle_) != ESP_OK) {
+        return;
     }
+    gfx_obj_t* toast = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL);
+    if (toast != nullptr) {
+        gfx_obj_set_size(toast, 220, 40);
+        gfx_obj_align(toast, GFX_ALIGN_TOP_MID, 0, 20);
+    }
+    gfx_obj_t* status_icon = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_STATUS_ICON);
+    if (status_icon != nullptr) {
+        gfx_obj_align(status_icon, GFX_ALIGN_TOP_MID, -80, 18);
+    }
+    emote_unlock(emote_handle_);
 }
 
 void EmoteDisplay::SetTheme(Theme* const theme) { ESP_LOGI(TAG, "SetTheme: %p", theme); }

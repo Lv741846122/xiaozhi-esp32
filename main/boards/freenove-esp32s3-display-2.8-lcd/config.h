@@ -38,11 +38,14 @@
 #define LCD_SPI_HOST          SPI3_HOST
 
 #define LCD_TYPE_ILI9341_SERIAL
-#define DISPLAY_WIDTH         320
-#define DISPLAY_HEIGHT        240
+// Portrait comparison build: the ILI9341 is physically 240x320. Disabling
+// swap_xy keeps that native orientation instead of rotating it to landscape.
+// Flip back to 320/240 + DISPLAY_SWAP_XY true for the landscape build.
+#define DISPLAY_WIDTH         240
+#define DISPLAY_HEIGHT        320
 #define DISPLAY_MIRROR_X      false
 #define DISPLAY_MIRROR_Y      false
-#define DISPLAY_SWAP_XY       true
+#define DISPLAY_SWAP_XY       false
 #define DISPLAY_INVERT_COLOR  true
 #define DISPLAY_RGB_ORDER     LCD_RGB_ELEMENT_ORDER_BGR
 #define DISPLAY_OFFSET_X      0
