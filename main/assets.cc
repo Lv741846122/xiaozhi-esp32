@@ -4,6 +4,7 @@
 #include "cjson_utils.h"
 #include "display.h"
 #include "lvgl_theme.h"
+#include "sdkconfig.h"
 #if HAVE_LVGL
 #include <spi_flash_mmap.h>
 #endif
@@ -29,7 +30,15 @@ struct mmap_assets_table {
 
 Assets::Assets() {
     UseBuiltInTextFontCapability();
-#if HAVE_LVGL
+    // The strategy must follow the actual display backend, not whether LVGL was
+    // linked in. EmoteDisplay renders through emote_gfx and only gets its emoji,
+    // icons and fonts when EmoteStrategy mounts the assets partition into the
+    // emote engine. LVGL is compiled into these boards anyway, so keying off
+    // HAVE_LVGL alone left the emote engine with an empty resource table and the
+    // screen stayed black even though the assets partition was full.
+#if defined(CONFIG_USE_EMOTE_MESSAGE_STYLE)
+    strategy_ = std::make_unique<Assets::EmoteStrategy>();
+#elif HAVE_LVGL
     strategy_ = std::make_unique<Assets::LvglStrategy>();
 #else
     strategy_ = std::make_unique<Assets::EmoteStrategy>();
