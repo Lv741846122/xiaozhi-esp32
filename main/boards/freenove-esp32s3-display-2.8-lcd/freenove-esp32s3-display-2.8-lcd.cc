@@ -191,6 +191,17 @@ private:
         esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR);
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        // SpiLcdDisplay issues 0x29 (DISP ON) from its own constructor, but
+        // EmoteDisplay only writes GRAM and never touches the panel command
+        // layer. Without this the ILI9341 stays in display-off: backlight on,
+        // audio and the emote renderer alive, yet the panel outputs black.
+        // All upstream emote boards do this before constructing EmoteDisplay.
+        esp_err_t disp_on_err = esp_lcd_panel_disp_on_off(panel, true);
+        if (disp_on_err == ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "Panel does not support disp_on_off; assuming ON");
+        } else {
+            ESP_ERROR_CHECK(disp_on_err);
+        }
 #if CONFIG_USE_EMOTE_MESSAGE_STYLE
         display_ = new emote::EmoteDisplay(panel, panel_io, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 #else
