@@ -218,20 +218,67 @@ bool EmoteDisplay::SetEmotion(const char* const emotion) {
     return true;
 }
 
+void EmoteDisplay::ApplyPendingUserText() {
+    if (emote_handle_ == nullptr || pending_user_text_.empty()) {
+        return;
+    }
+    gfx_obj_t* toast = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL);
+    if (toast == nullptr) {
+        ESP_LOGW(TAG, "toast_label not found; STT caption cannot be shown");
+        return;
+    }
+    if (emote_lock(emote_handle_) != ESP_OK) {
+        return;
+    }
+    gfx_label_set_text(toast, pending_user_text_.c_str());
+    gfx_obj_set_visible(toast, true);
+    emote_unlock(emote_handle_);
+}
+
 void EmoteDisplay::SetChatMessage(const char* const role, const char* const content) {
     ESP_LOGI(TAG, "SetChatMessage: %s, %s", role, content);
-    if (emote_handle_ && content && strlen(content) > 0) {
-        if ((std::strcmp(role, "system") == 0) && std::strstr(content, "xiaozhi.me")) {
-            size_t len = strlen(content);
-            char* new_content = new char[len + 1];
-            strcpy(new_content, content);
-            std::replace(new_content, new_content + len, static_cast<char>(0x0A),
-                         static_cast<char>(0x20));
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SYS, new_content);
-            delete[] new_content;
-        } else {
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SPEAK, content);
+    if (emote_handle_ == nullptr || role == nullptr || content == nullptr) {
+        return;
+    }
+
+    // "user" is the live speech-to-text transcript. emote_set_event_msg() hides
+    // every UI element before running the handler, and EVT_LISTEN discards its
+    // message entirely - so while the state machine flips between listening
+    // and speaking, a transcript pushed via EVT_SPEAK disappears at once.
+    // Write it directly to the toast label and re-apply it after status changes.
+    if (std::strcmp(role, "user") == 0) {
+        if (content[0] == '\0') {
+            pending_user_text_.clear();
+            gfx_obj_t* toast = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL);
+            if (toast) {
+                emote_lock(emote_handle_);
+                gfx_label_set_text(toast, "");
+                gfx_obj_set_visible(toast, false);
+                emote_unlock(emote_handle_);
+            }
+            return;
         }
+        pending_user_text_ = content;
+        ApplyPendingUserText();
+        return;
+    }
+
+    if (content[0] == '\0') {
+        return;
+    }
+    // Any assistant/system message replaces the transcript.
+    pending_user_text_.clear();
+
+    if ((std::strcmp(role, "system") == 0) && std::strstr(content, "xiaozhi.me")) {
+        size_t len = strlen(content);
+        char* new_content = new char[len + 1];
+        strcpy(new_content, content);
+        std::replace(new_content, new_content + len, static_cast<char>(0x0A),
+                     static_cast<char>(0x20));
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SYS, new_content);
+        delete[] new_content;
+    } else {
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SPEAK, content);
     }
 }
 
@@ -247,6 +294,8 @@ void EmoteDisplay::SetStatus(const char* const status) {
         } else if (std::strcmp(status, Lang::Strings::ERROR) == 0) {
             emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SET, NULL);
         }
+        // The events above hide the toast label; keep the transcript visible.
+        ApplyPendingUserText();
     }
 }
 

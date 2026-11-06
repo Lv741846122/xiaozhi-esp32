@@ -48,6 +48,12 @@ private:
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 
+    // STT captions are written straight to the toast label instead of going
+    // through an event: every event hides all UI elements and EVT_LISTEN drops
+    // its message, so a caption sent during recognition is wiped immediately.
+    void ApplyPendingUserText();
+    std::string pending_user_text_;
+
     emote_handle_t emote_handle_ = nullptr;
 };
 
