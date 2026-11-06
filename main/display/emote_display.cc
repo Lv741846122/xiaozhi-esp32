@@ -201,6 +201,15 @@ bool EmoteDisplay::SetEmotion(const char* const emotion) {
     if (emote_handle_ == nullptr || emotion == nullptr || strlen(emotion) == 0) {
         return false;
     }
+    // Push the new eye ring to the panel immediately, even when the EAF
+    // animation is left untouched below.
+    RefreshAll();
+    // The server sends emotion names the shipped EAF pack does not carry
+    // (e.g. "robot_2"); asking the engine for them only produces a hard error
+    // log. The Grok Ball overlay already drew them, so stop here.
+    if (GrokRingForName(emotion) < 0) {
+        return true;
+    }
     // The result was already being produced and discarded. An emotion the mounted asset pack
     // does not carry fails inside emote_set_emoji_animation, and callers had no way to find
     // out: an MCP tool, a server-driven emotion or a board's own avatar mapping all saw the

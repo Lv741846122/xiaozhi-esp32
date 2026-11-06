@@ -11,6 +11,7 @@
 // icons keep rendering normally.
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -114,7 +115,39 @@ inline int GrokRingForName(const char* name) {
 
 inline void GrokSetEmotion(const char* name) {
     int ring = GrokRingForName(name);
-    if (ring >= 0 && ring != s_grok_ring.load(std::memory_order_relaxed)) {
+    if (ring < 0) {
+        // The server sends emotion names that the EAF pack does not carry
+        // (e.g. "robot_2"). Match on keywords first, then fall back to a
+        // stable hash so every distinct emotion still changes the face.
+        static const struct { const char* key; int ring; } kHints[] = {
+            {"happy", 2}, {"laugh", 11}, {"joy", 19}, {"smile", 2},
+            {"sad", 4}, {"cry", 22}, {"sleep", 13}, {"tired", 13},
+            {"angry", 7}, {"mad", 7}, {"surpris", 3}, {"shock", 21},
+            {"think", 15}, {"confus", 8}, {"love", 24}, {"shy", 24},
+            {"wink", 14}, {"silly", 5}, {"neutral", 0}, {"idle", 8},
+        };
+        char lower[32] = {0};
+        if (name != nullptr) {
+            strncpy(lower, name, sizeof(lower) - 1);
+            for (char* p = lower; *p; ++p) {
+                *p = static_cast<char>(tolower(static_cast<unsigned char>(*p)));
+            }
+        }
+        for (const auto& hint : kHints) {
+            if (strstr(lower, hint.key) != nullptr) {
+                ring = hint.ring;
+                break;
+            }
+        }
+        if (ring < 0) {
+            uint32_t hash = 0;
+            for (const char* p = name ? name : ""; *p; ++p) {
+                hash = hash * 31 + static_cast<unsigned char>(*p);
+            }
+            ring = static_cast<int>(hash % kGrokRingCount);
+        }
+    }
+    if (ring != s_grok_ring.load(std::memory_order_relaxed)) {
         GrokRebuild(ring);
     }
 }
