@@ -29,6 +29,7 @@
 #include "board.h"
 #include "expression_emote.h"
 #include "gfx.h"
+#include "grok_ball_overlay.h"
 
 namespace emote {
 
@@ -86,6 +87,11 @@ static void OnFlushCallback(int x_start, int y_start, int x_end, int y_end, cons
         emote_notify_flush_finished(handle);
         return;
     }
+
+    // Replace the stock colour emote with a black-background / white-stroke
+    // Grok Ball. Only the middle band is touched: the status bar above and the
+    // caption strip below keep whatever the emote engine rendered.
+    GrokApplyToBlock(x_start, y_start, x_end, y_end, data);
 
     esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x_start, y_start, x_end, y_end, data);
     if (err != ESP_OK) {
@@ -190,6 +196,8 @@ EmoteDisplay::~EmoteDisplay() {
 
 bool EmoteDisplay::SetEmotion(const char* const emotion) {
     ESP_LOGI(TAG, "SetEmotion: %s", emotion);
+    // Pick the Grok Ball eye ring for this emotion (server-driven or local).
+    GrokSetEmotion(emotion);
     if (emote_handle_ == nullptr || emotion == nullptr || strlen(emotion) == 0) {
         return false;
     }
@@ -358,8 +366,16 @@ bool EmoteDisplay::GetAssetData(const std::string& name, const uint8_t*& data, s
 }
 
 void EmoteDisplay::LoadAssets() {
-    if (emote_handle_ != nullptr) {
-        emote_load_assets(emote_handle_);
+    if (emote_handle_ == nullptr) {
+        return;
+    }
+    emote_load_assets(emote_handle_);
+    // The stock 320_240 layout places toast_label at x=25, which reads as
+    // off-centre on a 320px panel. UI objects only exist after assets load.
+    gfx_obj_t* toast = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL);
+    if (toast != nullptr && emote_lock(emote_handle_) == ESP_OK) {
+        gfx_obj_align(toast, GFX_ALIGN_TOP_MID, 0, 20);
+        emote_unlock(emote_handle_);
     }
 }
 
