@@ -179,6 +179,9 @@ static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel, const 
 void EmoteDisplay::OnAnimTimer(void* arg) {
     auto* self = static_cast<EmoteDisplay*>(arg);
     if (self != nullptr) {
+        // Compute the pose ONCE per frame, then ask the engine to repaint.
+        // All 16-row flush blocks of that frame read the cached pose.
+        GrokUpdatePose(esp_timer_get_time());
         self->RefreshAll();
     }
 }

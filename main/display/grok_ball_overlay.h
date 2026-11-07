@@ -44,6 +44,12 @@ constexpr int kGrokMaskBytes = (kGrokScreenW * kGrokScreenH + 7) / 8;
 static std::atomic<int> s_grok_ring{0};
 static std::atomic<bool> s_grok_mask_ready{false};
 static std::atomic<bool> s_grok_active{false};
+// A frame is flushed as many 16-row blocks over ~75ms. Every block MUST use
+// the same pose, otherwise the top and bottom of the face show different
+// blink/open states and the screen appears to flicker or tear. The animation
+// timer computes the pose once and stores it here; flush blocks only read it.
+static std::atomic<int> s_pose_bob{0};
+static std::atomic<int> s_pose_eye_scale{100};
 static uint8_t s_ball_mask[kGrokMaskBytes];
 static uint8_t s_eye_mask[kGrokMaskBytes];
 
@@ -195,34 +201,57 @@ inline void GrokSetEmotion(const char* name) {
     }
 }
 
-// Time-driven animation. Cheap: two integer params reused for the whole block.
-inline void GrokFramePose(int64_t now_us, int* bob, int* eye_scale) {
-    // Quantise to 40ms: a full frame is flushed as many 16-row blocks, and
-    // every block must use the same pose or the face tears horizontally.
-    int t_ms = static_cast<int>(now_us / 40000) * 40;
-    // Breathing: one cycle every 3.2s, eyes drift +/-3px.
-    float phase = static_cast<float>(t_ms % 3200) / 3200.0f * 6.2831853f;
-    *bob = static_cast<int>(3.0f * std::sin(phase));
-    // Idle blink: 130ms every 4.2s, eyes squash to a thin line. Start at
-    // 2s so the very first frame after boot is not a blink.
-    *eye_scale = 100;
-    int blink_phase = t_ms % 4200;
-    if (blink_phase >= 2000 && blink_phase < 2130) {
-        *eye_scale = 12;
+// Called once per animation tick by the timer, never from a flush block.
+// All motion is continuous (sine based) instead of hard on/off jumps, which
+// previously read as random flashing.
+inline void GrokUpdatePose(int64_t now_us) {
+    int t_ms = static_cast<int>(now_us / 1000);
+    constexpr float kPi2 = 6.2831853f;
+
+    // Idle breathing: a slow continuous 2.8s cycle. Eyes drift +/-3px and
+    // gently squash 88..100%, so the face is always alive but never flashes.
+    float breath = std::sin(static_cast<float>(t_ms % 2800) / 2800.0f * kPi2);
+    int bob = static_cast<int>(3.0f * breath);
+    int scale = 94 + static_cast<int>(6.0f * breath);
+
+    // Blink: once every 5s, squash and recover over 300ms (3-4 frames at
+    // 12fps) so it reads as a blink instead of a one-frame flash.
+    int blink_phase = t_ms % 5000;
+    // Skip the first cycle: t=0 falls inside the blink window and would make
+    // every boot / wake-up start with a flash.
+    if (t_ms > 2500 && blink_phase < 300) {
+        float k = std::sin(static_cast<float>(blink_phase) / 300.0f * 3.1415926f);
+        int blink_scale = 100 - static_cast<int>(80.0f * k);
+        if (blink_scale < scale) {
+            scale = blink_scale;
+        }
     }
-    // While listening or speaking: faster open/close rhythm ("talking").
+
+    // Talking: continuous 78..100% open, 520ms period. No square-wave jump.
     if (s_grok_active.load(std::memory_order_relaxed)) {
-        *eye_scale = (t_ms % 300 < 150) ? 55 : 100;
+        float sp = std::sin(static_cast<float>(t_ms % 520) / 520.0f * kPi2);
+        int talk_scale = 89 + static_cast<int>(11.0f * sp);
+        if (talk_scale < scale) {
+            scale = talk_scale;
+        }
     }
+    if (scale < 20) {
+        scale = 20;
+    }
+    s_pose_bob.store(bob, std::memory_order_relaxed);
+    s_pose_eye_scale.store(scale, std::memory_order_relaxed);
 }
 
 // Repaint one dirty rectangle before it goes to the panel.
 inline void GrokApplyToBlock(int x0, int y0, int x1, int y1, const void* data) {
     if (!s_grok_mask_ready.load(std::memory_order_relaxed)) {
         GrokRebuild(0);
+        GrokUpdatePose(esp_timer_get_time());
     }
-    int bob = 0, eye_scale = 100;
-    GrokFramePose(esp_timer_get_time(), &bob, &eye_scale);
+    // Read the pose cached by the animation timer. Never recompute it here:
+    // a full frame is split into many flush blocks spanning tens of ms.
+    int bob = s_pose_bob.load(std::memory_order_relaxed);
+    int eye_scale = s_pose_eye_scale.load(std::memory_order_relaxed);
 
     uint16_t* buf = static_cast<uint16_t*>(const_cast<void*>(data));
     int w = x1 - x0;
