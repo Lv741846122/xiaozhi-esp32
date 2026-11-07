@@ -4,11 +4,14 @@
 //
 // The browser grok-ball engine is SVG/JS and cannot run on the ESP32, and EAF
 // frames use a private "ZZ_S" compression that we cannot generate offline.
-// Instead we reuse the engine's real eye-ring geometry (grok_ball_data.h) and
-// repaint the emote band in the flush callback: black background, a white ball
-// outline and white eyes selected by the current emotion. The status bar on
-// top and the caption strip at the bottom are left untouched so the text and
-// icons keep rendering normally.
+// We reuse the engine's real 25 eye-ring contours (grok_ball_data.h) and
+// repaint the middle band in the flush callback.
+//
+// Two 1bpp masks are kept: a static ball outline and the solid eyes. The eyes
+// are sampled through a time-varying vertical transform on every flush, which
+// gives breathing, blinking and a speaking rhythm without ever re-running the
+// polygon fill in the render loop. The status bar and caption strip are left
+// untouched so text keeps rendering normally.
 
 #include <atomic>
 #include <cctype>
@@ -16,6 +19,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+
+#include <esp_timer.h>
 
 #include "grok_ball_data.h"
 
@@ -34,39 +39,46 @@ constexpr int kGrokRadius = 100;
 constexpr float kGrokScale = 200.0f / 229.0f;
 constexpr float kGrokViewCenter = 114.2705f;
 constexpr int kGrokEyeYOffset = 0;
+constexpr int kGrokMaskBytes = (kGrokScreenW * kGrokScreenH + 7) / 8;
 
 static std::atomic<int> s_grok_ring{0};
 static std::atomic<bool> s_grok_mask_ready{false};
-static uint8_t s_grok_mask[(kGrokScreenW * kGrokScreenH + 7) / 8];
+static std::atomic<bool> s_grok_active{false};
+static uint8_t s_ball_mask[kGrokMaskBytes];
+static uint8_t s_eye_mask[kGrokMaskBytes];
 
-inline void GrokSetPixel(int x, int y) {
+inline void GrokSetPixel(uint8_t* mask, int x, int y) {
     if (x < 0 || x >= kGrokScreenW || y < 0 || y >= kGrokScreenH) {
         return;
     }
     int idx = y * kGrokScreenW + x;
-    s_grok_mask[idx >> 3] |= static_cast<uint8_t>(1 << (idx & 7));
+    mask[idx >> 3] |= static_cast<uint8_t>(1 << (idx & 7));
 }
 
-inline void GrokDot(int x, int y, int r) {
+inline bool GrokGetPixel(const uint8_t* mask, int x, int y) {
+    if (x < 0 || x >= kGrokScreenW || y < 0 || y >= kGrokScreenH) {
+        return false;
+    }
+    int idx = y * kGrokScreenW + x;
+    return (mask[idx >> 3] >> (idx & 7)) & 1;
+}
+
+inline void GrokDot(uint8_t* mask, int x, int y, int r) {
     for (int dy = -r; dy <= r; ++dy) {
         for (int dx = -r; dx <= r; ++dx) {
             if (dx * dx + dy * dy <= r * r) {
-                GrokSetPixel(x + dx, y + dy);
+                GrokSetPixel(mask, x + dx, y + dy);
             }
         }
     }
 }
 
-inline void GrokLine(int x0, int y0, int x1, int y1, int r) {
-    int dx = std::abs(x1 - x0);
-    int dy = std::abs(y1 - y0);
-    int steps = dx > dy ? dx : dy;
-    if (steps == 0) {
-        GrokDot(x0, y0, r);
-        return;
-    }
-    for (int i = 0; i <= steps; ++i) {
-        GrokDot(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, r);
+inline void GrokCircle(uint8_t* mask, int cx, int cy, int radius, int r) {
+    int steps = static_cast<int>(2 * 3.1415926f * radius);
+    for (int i = 0; i < steps; ++i) {
+        float a = 2 * 3.1415926f * i / steps;
+        GrokDot(mask, cx + static_cast<int>(radius * std::cos(a)),
+                cy + static_cast<int>(radius * std::sin(a)), r);
     }
 }
 
@@ -87,7 +99,7 @@ inline bool GrokInsidePolygon(float x, float y, const int* px, const int* py, in
     return inside;
 }
 
-inline void GrokFillEye(const GrokPoint* pts) {
+inline void GrokFillEye(uint8_t* mask, const GrokPoint* pts) {
     int xs[48], ys[48];
     int minx = 10000, maxx = -10000, miny = 10000, maxy = -10000;
     for (int i = 0; i < 48; ++i) {
@@ -107,18 +119,9 @@ inline void GrokFillEye(const GrokPoint* pts) {
                 continue;
             }
             if (GrokInsidePolygon(x + 0.5f, y + 0.5f, xs, ys, 48)) {
-                GrokSetPixel(x, y);
+                GrokSetPixel(mask, x, y);
             }
         }
-    }
-}
-
-inline void GrokCircle(int cx, int cy, int radius, int r) {
-    int steps = static_cast<int>(2 * 3.1415926f * radius);
-    for (int i = 0; i < steps; ++i) {
-        float a = 2 * 3.1415926f * i / steps;
-        GrokDot(cx + static_cast<int>(radius * std::cos(a)),
-                cy + static_cast<int>(radius * std::sin(a)), r);
     }
 }
 
@@ -126,15 +129,19 @@ inline void GrokRebuild(int ring) {
     if (ring < 0 || ring >= kGrokRingCount) {
         ring = 0;
     }
-    memset(s_grok_mask, 0, sizeof(s_grok_mask));
-    GrokCircle(kGrokCX, kGrokCY, kGrokRadius, 1);
+    memset(s_ball_mask, 0, sizeof(s_ball_mask));
+    memset(s_eye_mask, 0, sizeof(s_eye_mask));
+    GrokCircle(s_ball_mask, kGrokCX, kGrokCY, kGrokRadius, 1);
 
     const GrokRing& g = kGrokRings[ring];
-    // Solid white eyes (the previous build only drew the 48-point outline).
-    GrokFillEye(g.left);
-    GrokFillEye(g.right);
+    GrokFillEye(s_eye_mask, g.left);
+    GrokFillEye(s_eye_mask, g.right);
     s_grok_ring.store(ring, std::memory_order_relaxed);
     s_grok_mask_ready.store(true, std::memory_order_relaxed);
+}
+
+inline void GrokSetActive(bool active) {
+    s_grok_active.store(active, std::memory_order_relaxed);
 }
 
 inline int GrokRingForName(const char* name) {
@@ -152,9 +159,9 @@ inline int GrokRingForName(const char* name) {
 inline void GrokSetEmotion(const char* name) {
     int ring = GrokRingForName(name);
     if (ring < 0) {
-        // The server sends emotion names that the EAF pack does not carry
-        // (e.g. "robot_2"). Match on keywords first, then fall back to a
-        // stable hash so every distinct emotion still changes the face.
+        // The server sends emotion names the EAF pack does not carry
+        // (e.g. "robot_2"). Match keywords first, then a stable hash so
+        // every distinct emotion still changes the face.
         static const struct { const char* key; int ring; } kHints[] = {
             {"happy", 2}, {"laugh", 11}, {"joy", 19}, {"smile", 2},
             {"sad", 4}, {"cry", 22}, {"sleep", 13}, {"tired", 13},
@@ -188,12 +195,35 @@ inline void GrokSetEmotion(const char* name) {
     }
 }
 
-// Repaint one dirty rectangle before it goes to the panel. The mask is a plain
-// 1bpp lookup, so this stays cheap even when the emote engine flushes at 30fps.
+// Time-driven animation. Cheap: two integer params reused for the whole block.
+inline void GrokFramePose(int64_t now_us, int* bob, int* eye_scale) {
+    // Quantise to 40ms: a full frame is flushed as many 16-row blocks, and
+    // every block must use the same pose or the face tears horizontally.
+    int t_ms = static_cast<int>(now_us / 40000) * 40;
+    // Breathing: one cycle every 3.2s, eyes drift +/-3px.
+    float phase = static_cast<float>(t_ms % 3200) / 3200.0f * 6.2831853f;
+    *bob = static_cast<int>(3.0f * std::sin(phase));
+    // Idle blink: 130ms every 4.2s, eyes squash to a thin line. Start at
+    // 2s so the very first frame after boot is not a blink.
+    *eye_scale = 100;
+    int blink_phase = t_ms % 4200;
+    if (blink_phase >= 2000 && blink_phase < 2130) {
+        *eye_scale = 12;
+    }
+    // While listening or speaking: faster open/close rhythm ("talking").
+    if (s_grok_active.load(std::memory_order_relaxed)) {
+        *eye_scale = (t_ms % 300 < 150) ? 55 : 100;
+    }
+}
+
+// Repaint one dirty rectangle before it goes to the panel.
 inline void GrokApplyToBlock(int x0, int y0, int x1, int y1, const void* data) {
     if (!s_grok_mask_ready.load(std::memory_order_relaxed)) {
         GrokRebuild(0);
     }
+    int bob = 0, eye_scale = 100;
+    GrokFramePose(esp_timer_get_time(), &bob, &eye_scale);
+
     uint16_t* buf = static_cast<uint16_t*>(const_cast<void*>(data));
     int w = x1 - x0;
     int h = y1 - y0;
@@ -202,14 +232,18 @@ inline void GrokApplyToBlock(int x0, int y0, int x1, int y1, const void* data) {
         if (gy < kGrokBandTop || gy >= kGrokBandBottom) {
             continue;
         }
-        int row = gy * kGrokScreenW;
+        // Inverse of the squash transform: sampling y = CY + (screenY - CY)/s
+        // compresses the eyes toward CY. Multiplying by s instead would smear
+        // the eye centre column into a full-height white bar.
+        int dy = gy - kGrokCY;
+        int eye_y = kGrokCY + dy * 100 / eye_scale - bob;
         for (int x = 0; x < w; ++x) {
             int gx = x0 + x;
             if (gx < 0 || gx >= kGrokScreenW) {
                 continue;
             }
-            int idx = row + gx;
-            bool on = (s_grok_mask[idx >> 3] >> (idx & 7)) & 1;
+            bool on = GrokGetPixel(s_ball_mask, gx, gy) ||
+                      GrokGetPixel(s_eye_mask, gx, eye_y);
             buf[y * w + x] = on ? 0xFFFF : 0x0000;
         }
     }

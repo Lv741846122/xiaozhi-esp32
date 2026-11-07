@@ -176,6 +176,13 @@ static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel, const 
 // EmoteDisplay Class Implementation
 // ============================================================================
 
+void EmoteDisplay::OnAnimTimer(void* arg) {
+    auto* self = static_cast<EmoteDisplay*>(arg);
+    if (self != nullptr) {
+        self->RefreshAll();
+    }
+}
+
 EmoteDisplay::EmoteDisplay(const esp_lcd_panel_handle_t panel,
                            const esp_lcd_panel_io_handle_t panel_io, const int width,
                            const int height) {
@@ -185,9 +192,26 @@ EmoteDisplay::EmoteDisplay(const esp_lcd_panel_handle_t panel,
         .on_color_trans_done = OnFlushIoReady,
     };
     esp_lcd_panel_io_register_event_callbacks(panel_io, &cbs, emote_handle_);
+
+    // 12fps full-frame nudge. Once idle the engine only repaints a narrow
+    // 17-row strip, which would leave the Grok Ball frozen.
+    const esp_timer_create_args_t timer_args = {
+        .callback = &EmoteDisplay::OnAnimTimer,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "grok_anim",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &anim_timer_));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(anim_timer_, 83 * 1000));
 }
 
 EmoteDisplay::~EmoteDisplay() {
+    if (anim_timer_ != nullptr) {
+        esp_timer_stop(anim_timer_);
+        esp_timer_delete(anim_timer_);
+        anim_timer_ = nullptr;
+    }
     if (emote_handle_) {
         emote_deinit(emote_handle_);
         emote_handle_ = nullptr;
@@ -205,9 +229,11 @@ bool EmoteDisplay::SetEmotion(const char* const emotion) {
     // animation is left untouched below.
     RefreshAll();
     // The server sends emotion names the shipped EAF pack does not carry
-    // (e.g. "robot_2"); asking the engine for them only produces a hard error
-    // log. The Grok Ball overlay already drew them, so stop here.
+    // (e.g. "robot_2"). Asking the engine for them produces a hard error and
+    // stops the repaint loop, so fall back to a stock animation while the
+    // Grok Ball overlay renders the real emotion-selected eye rings.
     if (GrokRingForName(emotion) < 0) {
+        emote_set_anim_emoji(emote_handle_, "neutral");
         return true;
     }
     // The result was already being produced and discarded. An emotion the mounted asset pack
@@ -301,6 +327,11 @@ void EmoteDisplay::SetChatMessage(const char* const role, const char* const cont
 
 void EmoteDisplay::SetStatus(const char* const status) {
     ESP_LOGI(TAG, "SetStatus: %s", status);
+    // Drive the Grok Ball talking rhythm for both listening and speaking.
+    // Idle breathing / blinking runs regardless of this flag.
+    GrokSetActive(status != nullptr &&
+        (std::strcmp(status, Lang::Strings::LISTENING) == 0 ||
+         std::strcmp(status, Lang::Strings::SPEAKING) == 0));
     if (emote_handle_ && status && strlen(status) > 0) {
         if (std::strcmp(status, Lang::Strings::LISTENING) == 0) {
             emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_LISTEN, NULL);
@@ -379,6 +410,10 @@ void EmoteDisplay::LoadAssets() {
         return;
     }
     emote_load_assets(emote_handle_);
+    // Keep a looping EAF animation alive. The engine only repaints the strip
+    // where its own animation object sits; without this the middle band goes
+    // static and the Grok Ball overlay never gets a chance to animate.
+    emote_set_anim_emoji(emote_handle_, "neutral");
     // The shipped 320_240 layout hard-codes toast_label at x=25 / width=280
     // and status_icon at x=-145. Both are off-centre or clipped on a 240px
     // wide portrait panel, so re-centre them once the objects exist.

@@ -46,7 +46,12 @@
 // Flip back to 320/240 + DISPLAY_SWAP_XY true for the landscape build.
 #define DISPLAY_WIDTH         240
 #define DISPLAY_HEIGHT        320
-#define DISPLAY_MIRROR_X      false
+// Orientation compensation. In landscape (MV=1, MX=0, MY=0) the text reads
+// correctly. Clearing MV to get native portrait also clears the transpose
+// compensation, which mirrors the text; ILI9341 portrait needs MX=1.
+// If the text is upside down instead of mirrored, set BOTH mirrors to true.
+// Landscape config: MIRROR_X false / MIRROR_Y false / SWAP_XY true.
+#define DISPLAY_MIRROR_X      true
 #define DISPLAY_MIRROR_Y      false
 #define DISPLAY_SWAP_XY       false
 #define DISPLAY_INVERT_COLOR  true

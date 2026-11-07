@@ -2,6 +2,7 @@
 
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_timer.h>
 #include <memory>
 #include <string>
 #include "display.h"
@@ -53,6 +54,12 @@ private:
     // its message, so a caption sent during recognition is wiped immediately.
     void ApplyPendingUserText();
     std::string pending_user_text_;
+
+    // The emote engine only repaints a narrow 17-row band while idle, so the
+    // Grok Ball animation would freeze. A low-rate full-frame nudge keeps the
+    // middle band refreshing without pushing the SPI bus to its limit.
+    static void OnAnimTimer(void* arg);
+    esp_timer_handle_t anim_timer_ = nullptr;
 
     emote_handle_t emote_handle_ = nullptr;
 };
