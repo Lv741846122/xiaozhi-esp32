@@ -18,6 +18,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <lvgl.h>
+#include <driver/temperature_sensor.h>
 
 // FreeRTOS headers
 #include <freertos/FreeRTOS.h>
@@ -32,6 +33,27 @@
 #include "grok_ball_overlay.h"
 
 namespace emote {
+
+// ESP32-S3 internal temperature sensor. It reports die temperature, not room
+// air temperature, but it is the only on-board source without extra hardware.
+static temperature_sensor_handle_t s_temp_sensor = nullptr;
+static bool s_temp_sensor_tried = false;
+
+static void EnsureTemperatureSensor() {
+    if (s_temp_sensor_tried) {
+        return;
+    }
+    s_temp_sensor_tried = true;
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
+    if (temperature_sensor_install(&cfg, &s_temp_sensor) != ESP_OK) {
+        s_temp_sensor = nullptr;
+        return;
+    }
+    if (temperature_sensor_enable(s_temp_sensor) != ESP_OK) {
+        temperature_sensor_uninstall(s_temp_sensor);
+        s_temp_sensor = nullptr;
+    }
+}
 
 // ============================================================================
 // Constants and Type Definitions
@@ -178,12 +200,34 @@ static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel, const 
 
 void EmoteDisplay::OnAnimTimer(void* arg) {
     auto* self = static_cast<EmoteDisplay*>(arg);
-    if (self != nullptr) {
-        // Compute the pose ONCE per frame, then ask the engine to repaint.
-        // All 16-row flush blocks of that frame read the cached pose.
-        GrokUpdatePose(esp_timer_get_time());
-        self->RefreshAll();
+    if (self == nullptr) {
+        return;
     }
+    // Compute the pose ONCE per frame, then ask the engine to repaint.
+    // All 16-row flush blocks of that frame read the cached pose.
+    GrokUpdatePose(esp_timer_get_time());
+
+    // Refresh the fixed status bar once a second (12 ticks x 83ms).
+    static int s_tick = 0;
+    if (++s_tick >= 12) {
+        s_tick = 0;
+        EnsureTemperatureSensor();
+        time_t now = 0;
+        struct tm timeinfo = {};
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        float celsius = 0.0f;
+        if (s_temp_sensor != nullptr &&
+            temperature_sensor_get_celsius(s_temp_sensor, &celsius) != ESP_OK) {
+            celsius = 0.0f;
+        }
+        int level = 100;
+        bool charging = false, discharging = false;
+        Board::GetInstance().GetBatteryLevel(level, charging, discharging);
+        GrokSetStatus(timeinfo.tm_hour, timeinfo.tm_min,
+                      static_cast<int>(celsius), level, charging);
+    }
+    self->RefreshAll();
 }
 
 EmoteDisplay::EmoteDisplay(const esp_lcd_panel_handle_t panel,
@@ -425,13 +469,14 @@ void EmoteDisplay::LoadAssets() {
     }
     gfx_obj_t* toast = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL);
     if (toast != nullptr) {
-        gfx_obj_set_size(toast, 220, 40);
-        gfx_obj_align(toast, GFX_ALIGN_TOP_MID, 0, 20);
+        // Move captions out of the top row: a fixed status bar lives there
+        // now. One text row plus a small gap below the ball.
+        gfx_obj_set_size(toast, 224, 26);
+        gfx_obj_align(toast, GFX_ALIGN_BOTTOM_MID, 0, -16);
     }
-    gfx_obj_t* status_icon = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_STATUS_ICON);
-    if (status_icon != nullptr) {
-        gfx_obj_align(status_icon, GFX_ALIGN_TOP_MID, -80, 18);
-    }
+    // The EAF status icon / clock / battery objects are anchored at the top
+    // by the shipped layout. The overlay repaints y<34 completely, so they
+    // are simply covered; no need to fight their timers here.
     emote_unlock(emote_handle_);
 }
 

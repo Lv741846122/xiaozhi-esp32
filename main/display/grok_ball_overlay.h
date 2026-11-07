@@ -1,22 +1,21 @@
 #pragma once
 
-// Grok Ball style overlay for EmoteDisplay.
+// Grok Ball overlay for EmoteDisplay, portrait 240x320.
 //
-// The browser grok-ball engine is SVG/JS and cannot run on the ESP32, and EAF
-// frames use a private "ZZ_S" compression that we cannot generate offline.
-// We reuse the engine's real 25 eye-ring contours (grok_ball_data.h) and
-// repaint the middle band in the flush callback.
+// Screen is split into three bands, all driven from the flush callback:
+//   y [0, 34)   fixed status bar: speaker / time+temperature / battery
+//   y [40, 258) black stage with the white ball and animated solid eyes
+//   y [258,320) untouched - the EAF caption label renders here
 //
-// Two 1bpp masks are kept: a static ball outline and the solid eyes. The eyes
-// are sampled through a time-varying vertical transform on every flush, which
-// gives breathing, blinking and a speaking rhythm without ever re-running the
-// polygon fill in the render loop. The status bar and caption strip are left
-// untouched so text keeps rendering normally.
+// Three 1bpp masks are kept: status bar, static ball outline, solid eyes.
+// The animation timer computes one pose per frame and stores it; every flush
+// block reads that cached pose so a frame never tears.
 
 #include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -26,30 +25,31 @@
 
 namespace emote {
 
-// Portrait comparison build (native ILI9341 240x320).
-// For landscape use 320/240, band 46..200, centre (160,123), radius 72,
-// scale 144/229 and eyeYOffset 10.
 constexpr int kGrokScreenW = 240;
 constexpr int kGrokScreenH = 320;
-constexpr int kGrokBandTop = 46;      // keep top status bar / icons / clock
-constexpr int kGrokBandBottom = 272;  // keep the caption strip below
+constexpr int kGrokStatusH = 34;      // fixed status bar
+constexpr int kGrokBandTop = 40;      // small gap below the status bar
+constexpr int kGrokBandBottom = 258;  // caption strip starts here
 constexpr int kGrokCX = 120;
-constexpr int kGrokCY = 154;
-constexpr int kGrokRadius = 100;
-constexpr float kGrokScale = 200.0f / 229.0f;
+constexpr int kGrokCY = 166;          // ball centre moved down
+constexpr int kGrokRadius = 88;
+constexpr float kGrokScale = 176.0f / 229.0f;
 constexpr float kGrokViewCenter = 114.2705f;
-constexpr int kGrokEyeYOffset = 0;
 constexpr int kGrokMaskBytes = (kGrokScreenW * kGrokScreenH + 7) / 8;
+constexpr int kStatusMaskBytes = (kGrokScreenW * kGrokStatusH + 7) / 8;
 
 static std::atomic<int> s_grok_ring{0};
 static std::atomic<bool> s_grok_mask_ready{false};
 static std::atomic<bool> s_grok_active{false};
-// A frame is flushed as many 16-row blocks over ~75ms. Every block MUST use
-// the same pose, otherwise the top and bottom of the face show different
-// blink/open states and the screen appears to flicker or tear. The animation
-// timer computes the pose once and stores it here; flush blocks only read it.
+// One pose per frame, cached so all 16-row flush blocks agree.
 static std::atomic<int> s_pose_bob{0};
 static std::atomic<int> s_pose_eye_scale{100};
+static std::atomic<int> s_pose_gaze_x{0};
+static std::atomic<int> s_pose_ball_scale{100};
+// The status text is rebuilt once a second from the timer task while the
+// render task reads it. Double buffer + atomic index avoids a torn frame.
+static uint8_t s_status_mask[2][kStatusMaskBytes];
+static std::atomic<int> s_status_front{0};
 static uint8_t s_ball_mask[kGrokMaskBytes];
 static uint8_t s_eye_mask[kGrokMaskBytes];
 
@@ -79,6 +79,143 @@ inline void GrokDot(uint8_t* mask, int x, int y, int r) {
     }
 }
 
+inline void GrokLine(uint8_t* mask, int x0, int y0, int x1, int y1, int r) {
+    int dx = std::abs(x1 - x0);
+    int dy = std::abs(y1 - y0);
+    int steps = dx > dy ? dx : dy;
+    if (steps == 0) {
+        GrokDot(mask, x0, y0, r);
+        return;
+    }
+    for (int i = 0; i <= steps; ++i) {
+        GrokDot(mask, x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, r);
+    }
+}
+
+// ---- tiny 5x7 ASCII font, drawn at 2x (10x14 px per glyph) ----------------
+struct GrokGlyph {
+    char c;
+    uint8_t rows[7];
+};
+static const GrokGlyph kGrokFont[] = {
+    {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+    {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+    {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+    {'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}},
+    {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+    {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+    {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+    {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+    {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+    {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+    {':', {0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00}},
+    {' ', {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+    {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
+    {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+    {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+    {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+    {'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+    {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}},
+};
+constexpr int kGrokGlyphW = 12;  // 10px glyph + 2px spacing
+
+inline void GrokDrawChar(uint8_t* mask, char c, int x, int y) {
+    const GrokGlyph* g = nullptr;
+    for (const auto& item : kGrokFont) {
+        if (item.c == c) {
+            g = &item;
+            break;
+        }
+    }
+    if (g == nullptr) {
+        return;
+    }
+    for (int row = 0; row < 7; ++row) {
+        for (int col = 0; col < 5; ++col) {
+            if ((g->rows[row] >> (4 - col)) & 1) {
+                for (int sy = 0; sy < 2; ++sy) {
+                    for (int sx = 0; sx < 2; ++sx) {
+                        GrokSetPixel(mask,x + col * 2 + sx, y + row * 2 + sy);
+                    }
+                }
+            }
+        }
+    }
+}
+
+inline void GrokDrawText(uint8_t* mask, const char* text, int x, int y) {
+    for (const char* p = text; *p; ++p) {
+        GrokDrawChar(mask, *p, x, y);
+        x += kGrokGlyphW;
+    }
+}
+
+inline void GrokDrawSpeaker(uint8_t* mask, int x, int y) {
+    // body
+    for (int yy = y + 4; yy <= y + 10; ++yy) {
+        for (int xx = x; xx <= x + 4; ++xx) {
+            GrokSetPixel(mask,xx, yy);
+        }
+    }
+    // cone
+    for (int i = 0; i <= 8; ++i) {
+        int half = i / 2;
+        for (int d = -half; d <= half; ++d) {
+            GrokSetPixel(mask,x + 5 + i, y + 7 + d);
+        }
+    }
+    // two sound arcs
+    for (int i = 0; i <= 6; ++i) {
+        GrokSetPixel(mask,x + 16 + (i / 3), y + 2 + i);
+        GrokSetPixel(mask,x + 16 + (i / 3), y + 12 - i);
+    }
+}
+
+inline void GrokDrawBattery(uint8_t* mask, int x, int y, int percent, bool charging) {
+    const int w = 17, h = 10;
+    for (int i = 0; i < w; ++i) {
+        GrokSetPixel(mask,x + i, y);
+        GrokSetPixel(mask,x + i, y + h);
+    }
+    for (int i = 0; i <= h; ++i) {
+        GrokSetPixel(mask,x, y + i);
+        GrokSetPixel(mask,x + w, y + i);
+    }
+    for (int i = 2; i <= 5; ++i) {
+        GrokSetPixel(mask,x + w + 1, y + i);
+        GrokSetPixel(mask,x + w + 2, y + i);
+    }
+    int fill = (w - 4) * (percent < 0 ? 0 : (percent > 100 ? 100 : percent)) / 100;
+    for (int i = 0; i < fill; ++i) {
+        for (int j = 2; j < h - 1; ++j) {
+            GrokSetPixel(mask,x + 2 + i, y + j);
+        }
+    }
+    if (charging) {
+        // small plus sign in the middle
+        for (int i = 3; i <= 6; ++i) {
+            GrokSetPixel(mask,x + 8, y + i);
+            GrokSetPixel(mask,x + 6 + i, y + 5);
+        }
+    }
+}
+
+inline void GrokSetStatus(int hour, int minute, int temp_c, int battery, bool charging) {
+    int back = 1 - s_status_front.load(std::memory_order_relaxed);
+    uint8_t* mask = s_status_mask[back];
+    memset(mask, 0, kStatusMaskBytes);
+    GrokDrawSpeaker(mask, 10, 8);
+    char mid[20];
+    snprintf(mid, sizeof(mid), "%02d:%02d %dC", hour, minute, temp_c);
+    GrokDrawText(mask, mid, (kGrokScreenW - static_cast<int>(strlen(mid)) * kGrokGlyphW) / 2, 10);
+    GrokDrawBattery(mask, 184, 12, battery, charging);
+    char bat[8];
+    snprintf(bat, sizeof(bat), "%d", battery);
+    GrokDrawText(mask, bat, 206, 10);
+    s_status_front.store(back, std::memory_order_relaxed);
+}
+
+// ---- ball / eyes -----------------------------------------------------------
 inline void GrokCircle(uint8_t* mask, int cx, int cy, int radius, int r) {
     int steps = static_cast<int>(2 * 3.1415926f * radius);
     for (int i = 0; i < steps; ++i) {
@@ -88,8 +225,6 @@ inline void GrokCircle(uint8_t* mask, int cx, int cy, int radius, int r) {
     }
 }
 
-// Even-odd point-in-polygon test, used to fill the 48-point eye rings so the
-// eyes are solid white shapes instead of thin outlines.
 inline bool GrokInsidePolygon(float x, float y, const int* px, const int* py, int n) {
     bool inside = false;
     for (int i = 0, j = n - 1; i < n; j = i++) {
@@ -110,7 +245,7 @@ inline void GrokFillEye(uint8_t* mask, const GrokPoint* pts) {
     int minx = 10000, maxx = -10000, miny = 10000, maxy = -10000;
     for (int i = 0; i < 48; ++i) {
         xs[i] = kGrokCX + static_cast<int>((pts[i].x / 10.0f - kGrokViewCenter) * kGrokScale);
-        ys[i] = kGrokCY + static_cast<int>((pts[i].y / 10.0f - kGrokViewCenter) * kGrokScale) + kGrokEyeYOffset;
+        ys[i] = kGrokCY + static_cast<int>((pts[i].y / 10.0f - kGrokViewCenter) * kGrokScale);
         if (xs[i] < minx) minx = xs[i];
         if (xs[i] > maxx) maxx = xs[i];
         if (ys[i] < miny) miny = ys[i];
@@ -138,7 +273,6 @@ inline void GrokRebuild(int ring) {
     memset(s_ball_mask, 0, sizeof(s_ball_mask));
     memset(s_eye_mask, 0, sizeof(s_eye_mask));
     GrokCircle(s_ball_mask, kGrokCX, kGrokCY, kGrokRadius, 1);
-
     const GrokRing& g = kGrokRings[ring];
     GrokFillEye(s_eye_mask, g.left);
     GrokFillEye(s_eye_mask, g.right);
@@ -165,9 +299,6 @@ inline int GrokRingForName(const char* name) {
 inline void GrokSetEmotion(const char* name) {
     int ring = GrokRingForName(name);
     if (ring < 0) {
-        // The server sends emotion names the EAF pack does not carry
-        // (e.g. "robot_2"). Match keywords first, then a stable hash so
-        // every distinct emotion still changes the face.
         static const struct { const char* key; int ring; } kHints[] = {
             {"happy", 2}, {"laugh", 11}, {"joy", 19}, {"smile", 2},
             {"sad", 4}, {"cry", 22}, {"sleep", 13}, {"tired", 13},
@@ -201,78 +332,93 @@ inline void GrokSetEmotion(const char* name) {
     }
 }
 
-// Called once per animation tick by the timer, never from a flush block.
-// All motion is continuous (sine based) instead of hard on/off jumps, which
-// previously read as random flashing.
+// Called once per animation tick. Everything is continuous; no square waves.
 inline void GrokUpdatePose(int64_t now_us) {
     int t_ms = static_cast<int>(now_us / 1000);
     constexpr float kPi2 = 6.2831853f;
 
-    // Idle breathing: a slow continuous 2.8s cycle. Eyes drift +/-3px and
-    // gently squash 88..100%, so the face is always alive but never flashes.
+    // Breathing: eyes drift and squash gently, the ball itself pulses too.
     float breath = std::sin(static_cast<float>(t_ms % 2800) / 2800.0f * kPi2);
     int bob = static_cast<int>(3.0f * breath);
     int scale = 94 + static_cast<int>(6.0f * breath);
+    int ball_scale = 100 + static_cast<int>(2.0f * breath);
 
-    // Blink: once every 5s, squash and recover over 300ms (3-4 frames at
-    // 12fps) so it reads as a blink instead of a one-frame flash.
-    int blink_phase = t_ms % 5000;
-    // Skip the first cycle: t=0 falls inside the blink window and would make
-    // every boot / wake-up start with a flash.
-    if (t_ms > 2500 && blink_phase < 300) {
-        float k = std::sin(static_cast<float>(blink_phase) / 300.0f * 3.1415926f);
-        int blink_scale = 100 - static_cast<int>(80.0f * k);
-        if (blink_scale < scale) {
-            scale = blink_scale;
-        }
+    // Gaze: two incommensurate sines so it never looks metronomic, plus an
+    // occasional quick glance to one side.
+    float gaze = 8.0f * std::sin(static_cast<float>(t_ms % 2100) / 2100.0f * kPi2) +
+                 4.0f * std::sin(static_cast<float>(t_ms % 830) / 830.0f * kPi2);
+    int glance = t_ms % 6700;
+    if (glance < 320) {
+        gaze += 14.0f * std::sin(static_cast<float>(glance) / 320.0f * 3.1415926f);
+    }
+    int gaze_x = static_cast<int>(gaze);
+
+    // Two overlapping blink periods make blinks feel spontaneous rather than
+    // exactly every 5s. Skip the first 2.5s so boot never starts mid-blink.
+    int blink_a = t_ms % 5000;
+    int blink_b = t_ms % 7300;
+    if (t_ms > 2500 && blink_a < 300) {
+        int bs = 100 - static_cast<int>(80.0f * std::sin(static_cast<float>(blink_a) / 300.0f * 3.1415926f));
+        if (bs < scale) scale = bs;
+    } else if (t_ms > 2500 && blink_b < 260) {
+        int bs = 100 - static_cast<int>(68.0f * std::sin(static_cast<float>(blink_b) / 260.0f * 3.1415926f));
+        if (bs < scale) scale = bs;
     }
 
-    // Talking: continuous 78..100% open, 520ms period. No square-wave jump.
+    // Talking: wider squashing and a faster gaze sweep.
     if (s_grok_active.load(std::memory_order_relaxed)) {
-        float sp = std::sin(static_cast<float>(t_ms % 520) / 520.0f * kPi2);
-        int talk_scale = 89 + static_cast<int>(11.0f * sp);
-        if (talk_scale < scale) {
-            scale = talk_scale;
-        }
+        float sp = std::sin(static_cast<float>(t_ms % 480) / 480.0f * kPi2);
+        int talk = 82 + static_cast<int>(18.0f * sp);
+        if (talk < scale) scale = talk;
+        gaze_x += static_cast<int>(4.0f * std::sin(static_cast<float>(t_ms % 300) / 300.0f * kPi2));
     }
-    if (scale < 20) {
-        scale = 20;
-    }
+    if (scale < 20) scale = 20;
     s_pose_bob.store(bob, std::memory_order_relaxed);
     s_pose_eye_scale.store(scale, std::memory_order_relaxed);
+    s_pose_gaze_x.store(gaze_x, std::memory_order_relaxed);
+    s_pose_ball_scale.store(ball_scale, std::memory_order_relaxed);
 }
 
-// Repaint one dirty rectangle before it goes to the panel.
 inline void GrokApplyToBlock(int x0, int y0, int x1, int y1, const void* data) {
     if (!s_grok_mask_ready.load(std::memory_order_relaxed)) {
         GrokRebuild(0);
         GrokUpdatePose(esp_timer_get_time());
+        GrokSetStatus(0, 0, 0, 100, false);
     }
-    // Read the pose cached by the animation timer. Never recompute it here:
-    // a full frame is split into many flush blocks spanning tens of ms.
     int bob = s_pose_bob.load(std::memory_order_relaxed);
     int eye_scale = s_pose_eye_scale.load(std::memory_order_relaxed);
+    int gaze_x = s_pose_gaze_x.load(std::memory_order_relaxed);
+    int ball_scale = s_pose_ball_scale.load(std::memory_order_relaxed);
 
     uint16_t* buf = static_cast<uint16_t*>(const_cast<void*>(data));
     int w = x1 - x0;
     int h = y1 - y0;
     for (int y = 0; y < h; ++y) {
         int gy = y0 + y;
-        if (gy < kGrokBandTop || gy >= kGrokBandBottom) {
-            continue;
+        bool in_status = gy < kGrokStatusH;
+        bool in_gap = gy >= kGrokStatusH && gy < kGrokBandTop;
+        bool in_stage = gy >= kGrokBandTop && gy < kGrokBandBottom;
+        if (!in_status && !in_gap && !in_stage) {
+            continue;  // caption strip: leave the EAF label untouched
         }
-        // Inverse of the squash transform: sampling y = CY + (screenY - CY)/s
-        // compresses the eyes toward CY. Multiplying by s instead would smear
-        // the eye centre column into a full-height white bar.
         int dy = gy - kGrokCY;
+        int ball_y = kGrokCY + dy * 100 / ball_scale;
         int eye_y = kGrokCY + dy * 100 / eye_scale - bob;
         for (int x = 0; x < w; ++x) {
             int gx = x0 + x;
             if (gx < 0 || gx >= kGrokScreenW) {
                 continue;
             }
-            bool on = GrokGetPixel(s_ball_mask, gx, gy) ||
-                      GrokGetPixel(s_eye_mask, gx, eye_y);
+            bool on = false;
+            if (in_status) {
+                on = GrokGetPixel(s_status_mask[s_status_front.load(std::memory_order_relaxed)], gx, gy);
+            } else if (in_stage) {
+                int ball_x = kGrokCX + (gx - kGrokCX) * 100 / ball_scale;
+                on = GrokGetPixel(s_ball_mask, ball_x, ball_y);
+                if (!on) {
+                    on = GrokGetPixel(s_eye_mask, gx - gaze_x, eye_y);
+                }
+            }
             buf[y * w + x] = on ? 0xFFFF : 0x0000;
         }
     }
